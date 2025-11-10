@@ -9,6 +9,7 @@ from ..database import SessionLocal
 from ..models.models import Job, JobStatus
 from ..config import MAX_RETRIES
 from ..services.detector import detect_language
+from ..metrics import LANGID_JOBS_TOTAL, LANGID_JOBS_RUNNING, LANGID_PROCESSING_SECONDS, LANGID_ACTIVE_WORKERS
 
 def _mock_detect(file_path: str):
     name = os.path.basename(file_path).lower()
@@ -34,6 +35,7 @@ def process_one(session: Session, job: Job) -> None:
     job.progress = 10
     job.updated_at = datetime.now(UTC)
     session.commit()
+    LANGID_JOBS_RUNNING.inc()
 
     try:
         if os.environ.get("USE_MOCK_DETECTOR", "0") == "1":
@@ -50,6 +52,9 @@ def process_one(session: Session, job: Job) -> None:
         job.updated_at = datetime.now(UTC)
         session.commit()
         logger.info(f"Job {job.id} succeeded")
+        LANGID_JOBS_TOTAL.labels(status="succeeded").inc()
+        processing_time = (job.updated_at - job.created_at).total_seconds()
+        LANGID_PROCESSING_SECONDS.observe(processing_time)
     except Exception as e:
         logger.exception(f"Job {job.id} failed: {e}")
         job.attempts += 1
@@ -57,16 +62,21 @@ def process_one(session: Session, job: Job) -> None:
         job.status = JobStatus.queued if job.attempts <= MAX_RETRIES else JobStatus.failed
         job.updated_at = datetime.now(UTC)
         session.commit()
+        LANGID_JOBS_TOTAL.labels(status="failed").inc()
+    finally:
+        LANGID_JOBS_RUNNING.dec()
 
 def work_once() -> Optional[str]:
     session = SessionLocal()
     try:
+        LANGID_ACTIVE_WORKERS.inc()
         job = session.query(Job).filter(Job.status == JobStatus.queued).order_by(Job.created_at.asc()).with_for_update().first()
         if not job:
             return None
         process_one(session, job)
         return job.id
     finally:
+        LANGID_ACTIVE_WORKERS.dec()
         session.close()
 
 def process_one_sync(job_id: str, db_session: Session) -> None:

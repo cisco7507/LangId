@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from datetime import datetime
 
@@ -17,7 +17,7 @@ class JobStatusResponse(BaseModel):
 
 class ResultResponse(BaseModel):
     job_id: str
-    language: Literal["en","fr","unknown"]
+    language: str
     probability: float
     transcript_snippet: Optional[str] = None
     processing_ms: int
@@ -25,23 +25,6 @@ class ResultResponse(BaseModel):
 
 class SubmitByUrl(BaseModel):
     url: str
-
-class ModelMetrics(BaseModel):
-    size: str
-    device: str
-    compute: str
-
-class QueueMetrics(BaseModel):
-    queued: int
-    running: int
-    succeeded_24h: int
-    failed_24h: int
-
-class MetricsResponse(BaseModel):
-    time_utc: datetime
-    workers_configured: int
-    model: ModelMetrics
-    queue: QueueMetrics
 
 class JobListResponse(BaseModel):
     jobs: list[JobStatusResponse]

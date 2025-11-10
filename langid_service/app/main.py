@@ -6,11 +6,13 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from loguru import logger
 from sqlalchemy.orm import Session
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from .metrics import APP_REGISTRY
 
-from .config import LOG_DIR, MAX_WORKERS, WHISPER_MODEL_SIZE
+from .config import LOG_DIR, MAX_WORKERS, WHISPER_MODEL_SIZE, MAX_FILE_SIZE_MB
 from .database import Base, engine, SessionLocal
 from .models.models import Job, JobStatus
-from .schemas import EnqueueResponse, JobStatusResponse, ResultResponse, SubmitByUrl, JobListResponse, DeleteJobsRequest, MetricsResponse, ModelMetrics, QueueMetrics
+from .schemas import EnqueueResponse, JobStatusResponse, ResultResponse, SubmitByUrl, JobListResponse, DeleteJobsRequest
 from .utils import gen_uuid, ensure_dirs, validate_upload, move_to_storage
 from .worker.runner import work_once
 
@@ -56,51 +58,15 @@ def on_shutdown():
 def healthz():
     return {"status": "ok"}
 
-def get_metrics_data():
-    session = SessionLocal()
-    try:
-        now = datetime.now(UTC)
-        twenty_four_hours_ago = now - timedelta(hours=24)
+@app.get("/metrics")
+def metrics():
+    data = generate_latest(APP_REGISTRY)
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
-        queued = session.query(Job).filter(Job.status == JobStatus.queued).count()
-        running = session.query(Job).filter(Job.status == JobStatus.running).count()
-        succeeded_24h = session.query(Job).filter(Job.status == JobStatus.succeeded, Job.updated_at >= twenty_four_hours_ago).count()
-        failed_24h = session.query(Job).filter(Job.status == JobStatus.failed, Job.updated_at >= twenty_four_hours_ago).count()
-
-        return {
-            "queued": queued,
-            "running": running,
-            "succeeded_24h": succeeded_24h,
-            "failed_24h": failed_24h,
-        }
-    finally:
-        session.close()
-
-@app.get("/metrics", response_model=MetricsResponse)
-def get_metrics():
-    queue_data = get_metrics_data()
-    return MetricsResponse(
-        time_utc=datetime.now(UTC),
-        workers_configured=MAX_WORKERS,
-        model=ModelMetrics(
-            size=WHISPER_MODEL_SIZE,
-            device=os.environ.get("WHISPER_DEVICE", "cpu"),
-            compute=os.environ.get("WHISPER_COMPUTE", "int8"),
-        ),
-        queue=QueueMetrics(**queue_data),
-    )
-
-from prometheus_client import generate_latest, REGISTRY
-from .metrics import LANGID_JOBS_TOTAL, LANGID_INFER_DURATION_MS, LANGID_DECODE_FAIL_TOTAL, LANGID_LANG_PROBABILITY
-
-@app.get("/metrics/prometheus", response_class=Response)
-def get_prometheus_metrics():
-    # Unregister the default collectors
-    for collector in list(REGISTRY._collector_to_names.keys()):
-        if collector.__class__.__name__ not in ('Counter', 'Histogram', 'Gauge'):
-            REGISTRY.unregister(collector)
-
-    return Response(content=generate_latest(REGISTRY), media_type="text/plain")
+@app.get("/metrics/prometheus")
+def prometheus_metrics():
+    data = generate_latest(APP_REGISTRY)
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/jobs", response_model=JobListResponse)
 def get_jobs():
@@ -160,8 +126,6 @@ async def submit_job(file: UploadFile = File(...)):
         session.close()
 
     return EnqueueResponse(job_id=job_id, status="queued")
-
-from .config import MAX_FILE_SIZE_MB
 
 @app.post("/jobs/by-url", response_model=EnqueueResponse)
 async def submit_job_by_url(payload: SubmitByUrl):

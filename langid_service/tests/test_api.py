@@ -48,7 +48,7 @@ def test_submit_and_detect_sync(client):
     res = client.get(f"/jobs/{job_id}/result")
     assert res.status_code == 200, res.text
     js = res.json()
-    assert "language_mapped" in js
+    assert "language" in js
     assert "probability" in js
 
 def test_get_result_for_incomplete_job(client):
@@ -93,20 +93,12 @@ def test_delete_job(client):
     r = client.get(f"/jobs/{job_id}")
     assert r.status_code == 404, r.text
 
-def test_metrics_json(client):
-    r = client.get("/metrics")
-    assert r.status_code == 200, r.text
-    js = r.json()
-    assert "time_utc" in js
-    assert "workers_configured" in js
-    assert "model" in js
-    assert "queue" in js
-    assert js["model"]["size"] == "small"
-
 def test_metrics_prometheus(client):
     r = client.get("/metrics/prometheus")
     assert r.status_code == 200, r.text
     text = r.text
-    assert "langid_workers_configured" in text
-    assert "langid_queue_total" in text
-    assert "langid_model_info" in text
+    assert "langid_jobs_total" in text
+    assert "langid_jobs_running" in text
+    assert "langid_processing_seconds" in text
+    assert "langid_active_workers" in text
+    assert "langid_audio_seconds" in text

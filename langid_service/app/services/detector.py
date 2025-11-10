@@ -4,7 +4,7 @@ import os
 import sys
 from typing import Dict, Any, Optional
 from time import perf_counter
-import logging
+from loguru import logger
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -19,13 +19,8 @@ from ..config import (
 from .audio_io import load_audio_mono_16k, InvalidAudioError
 from ..metrics import (
     LANGID_JOBS_TOTAL,
-    LANGID_INFER_DURATION_MS,
-    LANGID_DECODE_FAIL_TOTAL,
-    LANGID_LANG_PROBABILITY,
+    LANGID_AUDIO_SECONDS,
 )
-
-# Configure logging
-logger = logging.getLogger(__name__)
 
 # --- Model Singleton ---
 _model: Optional[WhisperModel] = None
@@ -100,17 +95,18 @@ def detect_language(file_path: str) -> Dict[str, Any]:
     Returns:
         A dictionary containing detection results.
     """
-    logger.bind(job_id=os.path.basename(file_path), stage="detect_language")
+    log = logger.bind(job_id=os.path.basename(file_path), stage="detect_language")
     t0 = perf_counter()
 
     # 1. Load Audio
     try:
-        logger.info("Starting audio decoding.")
+        log.info("Starting audio decoding.")
         audio = load_audio_mono_16k(file_path)
-        logger.info("Audio decoded successfully.")
+        log.info("Audio decoded successfully.")
+        audio_duration_seconds = len(audio) / 16000.0
+        LANGID_AUDIO_SECONDS.observe(audio_duration_seconds)
     except InvalidAudioError as e:
-        logger.error(f"Audio decoding failed: {e}", exc_info=True)
-        LANGID_DECODE_FAIL_TOTAL.inc()
+        log.error(f"Audio decoding failed: {e}", exc_info=True)
         LANGID_JOBS_TOTAL.labels(status="invalid_audio").inc()
         return {
             "error": "InvalidAudioError",
@@ -131,11 +127,10 @@ def detect_language(file_path: str) -> Dict[str, Any]:
 
 
     # 3. Detect Language (No VAD Path)
-    logger.info("Starting language inference.")
-    infer_start_time = perf_counter()
+    log.info("Starting language inference.")
     features = model.feature_extractor(audio)
     if features.shape[-1] < 10: # If audio is too short
-        logger.warning("Audio is too short for language detection.")
+        log.warning("Audio is too short for language detection.")
         lang, prob = "und", 0.0
     else:
         # Detect language on the first 30 seconds of audio
@@ -144,12 +139,8 @@ def detect_language(file_path: str) -> Dict[str, Any]:
         results = model.model.detect_language(encoder_output)
         # Bypassing the transcribe() path for pure langid
         lang, prob = results[0][0]
-    infer_duration_ms = (perf_counter() - infer_start_time) * 1000
-    LANGID_INFER_DURATION_MS.observe(infer_duration_ms)
-    LANGID_LANG_PROBABILITY.labels(lang=lang).set(prob)
-    LANGID_JOBS_TOTAL.labels(status="succeeded").inc()
 
-    logger.info(f"Inference complete. Language: {lang}, Probability: {prob:.2f}")
+    log.info(f"Inference complete. Language: {lang}, Probability: {prob:.2f}")
 
     # 4. Map and Return Result
     mapped_lang = LANG_CODE_MAPPING.get(lang, "und")
@@ -162,7 +153,7 @@ def detect_language(file_path: str) -> Dict[str, Any]:
         "processing_ms": elapsed_ms,
         "model": WHISPER_MODEL_SIZE,
         "info": {
-            "duration": len(audio) / 16000.0,
+            "duration": audio_duration_seconds,
             "vad": False # Explicitly note that VAD was not used
         },
     }

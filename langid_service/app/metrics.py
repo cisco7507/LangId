@@ -1,34 +1,57 @@
-# langid_service/app/metrics.py
-from prometheus_client import Counter, Histogram, Gauge, REGISTRY
+# app/metrics.py
+from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry
 
-# --- Unregister metrics before defining them ---
-for collector in list(REGISTRY._collector_to_names.keys()):
-    if 'langid' in REGISTRY._collector_to_names[collector]:
-        REGISTRY.unregister(collector)
+# Single, app-scoped registry (not the global default REGISTRY)
+APP_REGISTRY = CollectorRegistry(auto_describe=True)
 
-# --- Job Status Counter ---
+# Define all metrics with `registry=APP_REGISTRY`
 LANGID_JOBS_TOTAL = Counter(
     "langid_jobs_total",
-    "Total number of jobs processed",
-    ["status"]  # Labels: "succeeded", "failed", "invalid_audio"
+    "Jobs processed by status",
+    ["status"],  # e.g., queued|running|succeeded|failed
+    registry=APP_REGISTRY,
 )
 
-# --- Inference Duration Histogram ---
-LANGID_INFER_DURATION_MS = Histogram(
-    "langid_infer_duration_ms",
-    "Inference duration in milliseconds",
-    buckets=[100, 250, 500, 1000, 2500, 5000, 10000]
+LANGID_JOBS_RUNNING = Gauge(
+    "langid_jobs_running",
+    "Number of jobs currently running",
+    registry=APP_REGISTRY,
 )
 
-# --- Audio Decoding Failure Counter ---
-LANGID_DECODE_FAIL_TOTAL = Counter(
-    "langid_decode_fail_total",
-    "Total number of audio decoding failures"
+LANGID_PROCESSING_SECONDS = Histogram(
+    "langid_processing_seconds",
+    "End-to-end processing latency per job",
+    buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
+    registry=APP_REGISTRY,
 )
 
-# --- Language Probability Gauge ---
-LANGID_LANG_PROBABILITY = Gauge(
-    "langid_lang_probability",
-    "Probability of the detected language",
-    ["lang"]
+LANGID_ACTIVE_WORKERS = Gauge(
+    "langid_active_workers",
+    "Number of active worker threads",
+    registry=APP_REGISTRY,
 )
+
+LANGID_AUDIO_SECONDS = Histogram(
+    "langid_audio_seconds",
+    "Input audio duration per job (seconds)",
+    buckets=(1, 3, 10, 30, 60, 120, 300, 900, 1800),
+    registry=APP_REGISTRY,
+)
+
+# …add any other metrics here, always with registry=APP_REGISTRY
+
+
+def _swap_registry_for_tests(new_registry):
+    """Testing helper: rebind metric objects to a fresh registry."""
+    global APP_REGISTRY, LANGID_JOBS_TOTAL, LANGID_JOBS_RUNNING, LANGID_PROCESSING_SECONDS, LANGID_ACTIVE_WORKERS, LANGID_AUDIO_SECONDS
+    APP_REGISTRY = new_registry
+
+    LANGID_JOBS_TOTAL = Counter("langid_jobs_total", "Jobs processed by status", ["status"], registry=APP_REGISTRY)
+    LANGID_JOBS_RUNNING = Gauge("langid_jobs_running", "Number of jobs currently running", registry=APP_REGISTRY)
+    LANGID_PROCESSING_SECONDS = Histogram("langid_processing_seconds", "End-to-end processing latency per job",
+                                          buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
+                                          registry=APP_REGISTRY)
+    LANGID_ACTIVE_WORKERS = Gauge("langid_active_workers", "Number of active worker threads", registry=APP_REGISTRY)
+    LANGID_AUDIO_SECONDS = Histogram("langid_audio_seconds", "Input audio duration per job (seconds)",
+                                     buckets=(1, 3, 10, 30, 60, 120, 300, 900, 1800),
+                                     registry=APP_REGISTRY)

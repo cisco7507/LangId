@@ -1,7 +1,27 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 function JobResultModal({ jobResult, onClose }) {
   const modalRef = useRef(null);
+  const fetchedRef = useRef(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+
+    const ac = new AbortController();
+    (async () => {
+      try {
+        const r = await fetch(`/jobs/${jobResult.job_id}/result`, { signal: ac.signal });
+        const data = await r.json();
+        setResult(data);
+      } catch (e) {
+        if (e.name !== 'AbortError') setError(String(e));
+      }
+    })();
+    return () => ac.abort();
+  }, [jobResult]);
 
   useEffect(() => {
     const modalNode = modalRef.current;
@@ -72,15 +92,13 @@ function JobResultModal({ jobResult, onClose }) {
           <h3 className="text-lg leading-6 font-medium text-gray-900">Job Result</h3>
           <div className="mt-2 px-7 py-3">
             <pre
+              className="whitespace-pre-wrap break-words"
               style={{
-                whiteSpace: 'pre-wrap',
-                overflow: 'auto',
-                maxHeight: '70vh',
                 fontFamily: 'monospace',
                 textAlign: 'left',
               }}
             >
-              {JSON.stringify(jobResult, null, 2)}
+              {error ? error : JSON.stringify(result, null, 2)}
             </pre>
           </div>
           <div className="items-center px-4 py-3">
