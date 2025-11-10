@@ -1,0 +1,250 @@
+import io, os, tempfile, time, threading, json
+from datetime import datetime, timedelta, UTC
+from pathlib import Path
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Response
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from loguru import logger
+from sqlalchemy.orm import Session
+
+from .config import LOG_DIR, MAX_WORKERS, WHISPER_MODEL_SIZE
+from .database import Base, engine, SessionLocal
+from .models.models import Job, JobStatus
+from .schemas import EnqueueResponse, JobStatusResponse, ResultResponse, SubmitByUrl, JobListResponse, DeleteJobsRequest, MetricsResponse, ModelMetrics, QueueMetrics
+from .utils import gen_uuid, ensure_dirs, validate_upload, move_to_storage
+from .worker.runner import work_once
+
+app = FastAPI(title="Windows LangID API", version="1.0.0")
+
+# Configure logging
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logger.add((LOG_DIR / "service.log").as_posix(), rotation="10 MB", retention=10, level="INFO")
+
+# Init database
+Base.metadata.create_all(bind=engine)
+ensure_dirs()
+
+# Background worker thread loop
+_stop_event = threading.Event()
+
+def worker_loop():
+    logger.info("Worker loop started")
+    while not _stop_event.is_set():
+        worked = work_once()
+        if not worked:
+            time.sleep(0.05)
+
+worker_threads = []
+def start_workers():
+    for i in range(MAX_WORKERS):
+        t = threading.Thread(target=worker_loop, name=f"worker-{i+1}", daemon=True)
+        t.start()
+        worker_threads.append(t)
+    logger.info(f"Started {len(worker_threads)} worker threads")
+
+@app.on_event("startup")
+def on_startup():
+    start_workers()
+
+@app.on_event("shutdown")
+def on_shutdown():
+    _stop_event.set()
+    for t in worker_threads:
+        t.join(timeout=5)
+
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+def get_metrics_data():
+    session = SessionLocal()
+    try:
+        now = datetime.now(UTC)
+        twenty_four_hours_ago = now - timedelta(hours=24)
+
+        queued = session.query(Job).filter(Job.status == JobStatus.queued).count()
+        running = session.query(Job).filter(Job.status == JobStatus.running).count()
+        succeeded_24h = session.query(Job).filter(Job.status == JobStatus.succeeded, Job.updated_at >= twenty_four_hours_ago).count()
+        failed_24h = session.query(Job).filter(Job.status == JobStatus.failed, Job.updated_at >= twenty_four_hours_ago).count()
+
+        return {
+            "queued": queued,
+            "running": running,
+            "succeeded_24h": succeeded_24h,
+            "failed_24h": failed_24h,
+        }
+    finally:
+        session.close()
+
+@app.get("/metrics", response_model=MetricsResponse)
+def get_metrics():
+    queue_data = get_metrics_data()
+    return MetricsResponse(
+        time_utc=datetime.now(UTC),
+        workers_configured=MAX_WORKERS,
+        model=ModelMetrics(
+            size=WHISPER_MODEL_SIZE,
+            device=os.environ.get("WHISPER_DEVICE", "cpu"),
+            compute=os.environ.get("WHISPER_COMPUTE", "int8"),
+        ),
+        queue=QueueMetrics(**queue_data),
+    )
+
+@app.get("/metrics/prometheus", response_class=Response)
+def get_prometheus_metrics():
+    queue_data = get_metrics_data()
+
+    # Model info
+    model_size = WHISPER_MODEL_SIZE
+    model_device = os.environ.get("WHISPER_DEVICE", "cpu")
+    model_compute = os.environ.get("WHISPER_COMPUTE", "int8")
+
+    # Prometheus format
+    lines = [
+        "# HELP langid_workers_configured Number of background workers configured.",
+        "# TYPE langid_workers_configured gauge",
+        f"langid_workers_configured {MAX_WORKERS}",
+        "",
+        "# HELP langid_queue_total Current queue size and recent outcomes.",
+        "# TYPE langid_queue_total gauge",
+        f'langid_queue_total{{state="queued"}} {queue_data["queued"]}',
+        f'langid_queue_total{{state="running"}} {queue_data["running"]}',
+        f'langid_queue_total{{state="succeeded_24h"}} {queue_data["succeeded_24h"]}',
+        f'langid_queue_total{{state="failed_24h"}} {queue_data["failed_24h"]}',
+        "",
+        "# HELP langid_model_info Model configuration (labels only).",
+        "# TYPE langid_model_info gauge",
+        f'langid_model_info{{size="{model_size}",device="{model_device}",compute="{model_compute}"}} 1',
+    ]
+
+    return Response(content="\n".join(lines), media_type="text/plain")
+
+@app.get("/jobs", response_model=JobListResponse)
+def get_jobs():
+    session = SessionLocal()
+    try:
+        jobs = session.query(Job).order_by(Job.created_at.desc()).all()
+        return JobListResponse(jobs=[JobStatusResponse(
+            job_id=job.id,
+            status=job.status.value,
+            progress=job.progress,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            attempts=job.attempts,
+            error=job.error,
+        ) for job in jobs])
+    finally:
+        session.close()
+
+@app.delete("/jobs")
+def delete_jobs(payload: DeleteJobsRequest):
+    session = SessionLocal()
+    try:
+        jobs_to_delete = session.query(Job).filter(Job.id.in_(payload.job_ids)).all()
+        for job in jobs_to_delete:
+            session.delete(job)
+        session.commit()
+        return {"status": "ok", "deleted_count": len(jobs_to_delete)}
+    finally:
+        session.close()
+
+@app.post("/jobs", response_model=EnqueueResponse)
+async def submit_job(file: UploadFile = File(...)):
+    # Validate upload
+    raw = await file.read()
+    try:
+        validate_upload(file.filename, len(raw))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Write temp file then move to storage
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(raw)
+        tmp.flush()
+        tmp_path = Path(tmp.name)
+
+    job_id = gen_uuid()
+    stored = move_to_storage(tmp_path, job_id)
+    logger.info(f"Enqueued upload for job {job_id}: {stored}")
+
+    # Persist job
+    session = SessionLocal()
+    try:
+        job = Job(id=job_id, status=JobStatus.queued, input_path=str(stored))
+        session.add(job)
+        session.commit()
+    finally:
+        session.close()
+
+    return EnqueueResponse(job_id=job_id, status="queued")
+
+@app.post("/jobs/by-url", response_model=EnqueueResponse)
+async def submit_job_by_url(payload: SubmitByUrl):
+    # Simple URL fetch (no auth) — for production, prefer signed URLs or internal sources.
+    import urllib.request
+    job_id = gen_uuid()
+    tmp_file = Path(tempfile.gettempdir()) / f"{job_id}.wav"
+
+    # Cast Pydantic Url to plain string
+    url = str(payload.url)
+
+    try:
+        # Be explicit about string types for stdlib
+        urllib.request.urlretrieve(url, str(tmp_file))
+
+        validate_upload(str(tmp_file), tmp_file.stat().st_size)
+        stored = move_to_storage(tmp_file, job_id)
+    except Exception as e:
+        if tmp_file.exists():
+            tmp_file.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=f"Failed to download/process URL: {e}")
+
+    session = SessionLocal()
+    try:
+        job = Job(id=job_id, status=JobStatus.queued, input_path=str(stored))
+        session.add(job)
+        session.commit()
+    finally:
+        session.close()
+
+    logger.info(f"Enqueued URL for job {job_id}: {stored}")
+    return EnqueueResponse(job_id=job_id, status="queued")
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+def get_status(job_id: str):
+    session = SessionLocal()
+    try:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return JobStatusResponse(
+            job_id=job.id,
+            status=job.status.value,
+            progress=job.progress,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            attempts=job.attempts,
+            error=job.error,
+        )
+    finally:
+        session.close()
+
+@app.get("/jobs/{job_id}/result", response_model=ResultResponse)
+def get_result(job_id: str):
+    session = SessionLocal()
+    try:
+        job = session.get(Job, job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if job.status != JobStatus.succeeded or not job.result_json:
+            raise HTTPException(status_code=409, detail=f"Job not completed (status={job.status.value})")
+        raw = json.loads(job.result_json)
+        return ResultResponse(
+            job_id=job.id,
+            language=raw.get("language_mapped", "unknown"),
+            probability=raw.get("probability", 0.0),
+            transcript_snippet=raw.get("transcript_snippet"),
+            processing_ms=raw.get("processing_ms", 0),
+            raw=raw,
+        )
+    finally:
+        session.close()
