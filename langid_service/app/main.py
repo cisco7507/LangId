@@ -195,11 +195,16 @@ def get_result(job_id: str):
         if job.status != JobStatus.succeeded or not job.result_json:
             raise HTTPException(status_code=409, detail=f"Job not completed (status={job.status.value})")
         raw = json.loads(job.result_json)
+        # The raw dict is the full, original result.
+        # We also promote a few key fields to the top level for convenience.
+        # To avoid duplication, we can pop them from the raw dict.
+        transcript_snippet = raw.pop("transcript_snippet", None)
+
         return ResultResponse(
             job_id=job.id,
             language=raw.get("language_mapped", "unknown"),
             probability=raw.get("probability", 0.0),
-            transcript_snippet=raw.get("transcript_snippet"),
+            transcript_snippet=transcript_snippet,
             processing_ms=raw.get("processing_ms", 0),
             raw=raw,
         )
