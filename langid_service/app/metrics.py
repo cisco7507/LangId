@@ -1,57 +1,63 @@
-# app/metrics.py
+# langid_service/app/metrics.py
 from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry
 
-# Single, app-scoped registry (not the global default REGISTRY)
-APP_REGISTRY = CollectorRegistry(auto_describe=True)
+REGISTRY = CollectorRegistry(auto_describe=True)
+_initialized = False
 
-# Define all metrics with `registry=APP_REGISTRY`
-LANGID_JOBS_TOTAL = Counter(
-    "langid_jobs_total",
-    "Jobs processed by status",
-    ["status"],  # e.g., queued|running|succeeded|failed
-    registry=APP_REGISTRY,
-)
-
-LANGID_JOBS_RUNNING = Gauge(
-    "langid_jobs_running",
-    "Number of jobs currently running",
-    registry=APP_REGISTRY,
-)
-
-LANGID_PROCESSING_SECONDS = Histogram(
-    "langid_processing_seconds",
-    "End-to-end processing latency per job",
-    buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
-    registry=APP_REGISTRY,
-)
-
-LANGID_ACTIVE_WORKERS = Gauge(
-    "langid_active_workers",
-    "Number of active worker threads",
-    registry=APP_REGISTRY,
-)
-
-LANGID_AUDIO_SECONDS = Histogram(
-    "langid_audio_seconds",
-    "Input audio duration per job (seconds)",
-    buckets=(1, 3, 10, 30, 60, 120, 300, 900, 1800),
-    registry=APP_REGISTRY,
-)
-
-# …add any other metrics here, always with registry=APP_REGISTRY
+# Define globals for type hinting and to be populated by initialization
+LANGID_JOBS_TOTAL: Counter = None
+LANGID_JOBS_RUNNING: Gauge = None
+LANGID_PROCESSING_SECONDS: Histogram = None
+LANGID_ACTIVE_WORKERS: Gauge = None
+LANGID_AUDIO_SECONDS: Histogram = None
 
 
-def _swap_registry_for_tests(new_registry):
+def _initialize_metrics(registry: CollectorRegistry):
+    """Helper to create and register all metrics with a given registry."""
+    global LANGID_JOBS_TOTAL, LANGID_JOBS_RUNNING, LANGID_PROCESSING_SECONDS, LANGID_ACTIVE_WORKERS, LANGID_AUDIO_SECONDS
+
+    LANGID_JOBS_TOTAL = Counter(
+        "langid_jobs_total",
+        "Jobs processed by status",
+        ["status"],
+        registry=registry,
+    )
+    LANGID_JOBS_RUNNING = Gauge(
+        "langid_jobs_running",
+        "Number of jobs currently running",
+        registry=registry,
+    )
+    LANGID_PROCESSING_SECONDS = Histogram(
+        "langid_processing_seconds",
+        "End-to-end processing latency per job",
+        buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
+        registry=registry,
+    )
+    LANGID_ACTIVE_WORKERS = Gauge(
+        "langid_active_workers",
+        "Number of active worker threads",
+        registry=registry,
+    )
+    LANGID_AUDIO_SECONDS = Histogram(
+        "langid_audio_seconds",
+        "Input audio duration per job (seconds)",
+        buckets=(1, 3, 10, 30, 60, 120, 300, 900, 1800),
+        registry=registry,
+    )
+
+def initialize_app_metrics():
+    """Initializes metrics for the application if not already done."""
+    global _initialized
+    if not _initialized:
+        _initialize_metrics(REGISTRY)
+        _initialized = True
+
+def _swap_registry_for_tests(new_registry: CollectorRegistry):
     """Testing helper: rebind metric objects to a fresh registry."""
-    global APP_REGISTRY, LANGID_JOBS_TOTAL, LANGID_JOBS_RUNNING, LANGID_PROCESSING_SECONDS, LANGID_ACTIVE_WORKERS, LANGID_AUDIO_SECONDS
-    APP_REGISTRY = new_registry
+    global REGISTRY
+    REGISTRY = new_registry
+    _initialize_metrics(new_registry)
 
-    LANGID_JOBS_TOTAL = Counter("langid_jobs_total", "Jobs processed by status", ["status"], registry=APP_REGISTRY)
-    LANGID_JOBS_RUNNING = Gauge("langid_jobs_running", "Number of jobs currently running", registry=APP_REGISTRY)
-    LANGID_PROCESSING_SECONDS = Histogram("langid_processing_seconds", "End-to-end processing latency per job",
-                                          buckets=(0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300),
-                                          registry=APP_REGISTRY)
-    LANGID_ACTIVE_WORKERS = Gauge("langid_active_workers", "Number of active worker threads", registry=APP_REGISTRY)
-    LANGID_AUDIO_SECONDS = Histogram("langid_audio_seconds", "Input audio duration per job (seconds)",
-                                     buckets=(1, 3, 10, 30, 60, 120, 300, 900, 1800),
-                                     registry=APP_REGISTRY)
+
+# Initialize metrics on module load for the app
+initialize_app_metrics()

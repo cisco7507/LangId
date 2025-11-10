@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from loguru import logger
 from sqlalchemy.orm import Session
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from .metrics import APP_REGISTRY
+from .metrics import REGISTRY
 
 from .config import LOG_DIR, MAX_WORKERS, WHISPER_MODEL_SIZE, MAX_FILE_SIZE_MB
 from .database import Base, engine, SessionLocal
@@ -60,12 +60,12 @@ def healthz():
 
 @app.get("/metrics")
 def metrics():
-    data = generate_latest(APP_REGISTRY)
+    data = generate_latest(REGISTRY)
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/metrics/prometheus")
 def prometheus_metrics():
-    data = generate_latest(APP_REGISTRY)
+    data = generate_latest(REGISTRY)
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/jobs", response_model=JobListResponse)

@@ -17,10 +17,7 @@ from ..config import (
     CT2_TRANSLATORS_CACHE,
 )
 from .audio_io import load_audio_mono_16k, InvalidAudioError
-from ..metrics import (
-    LANGID_JOBS_TOTAL,
-    LANGID_AUDIO_SECONDS,
-)
+from .. import metrics
 
 # --- Model Singleton ---
 _model: Optional[WhisperModel] = None
@@ -104,10 +101,10 @@ def detect_language(file_path: str) -> Dict[str, Any]:
         audio = load_audio_mono_16k(file_path)
         log.info("Audio decoded successfully.")
         audio_duration_seconds = len(audio) / 16000.0
-        LANGID_AUDIO_SECONDS.observe(audio_duration_seconds)
+        metrics.LANGID_AUDIO_SECONDS.observe(audio_duration_seconds)
     except InvalidAudioError as e:
         log.error(f"Audio decoding failed: {e}", exc_info=True)
-        LANGID_JOBS_TOTAL.labels(status="invalid_audio").inc()
+        metrics.LANGID_JOBS_TOTAL.labels(status="invalid_audio").inc()
         return {
             "error": "InvalidAudioError",
             "error_message": str(e),
@@ -118,7 +115,7 @@ def detect_language(file_path: str) -> Dict[str, Any]:
     try:
         model = get_model()
     except Exception as e:
-        LANGID_JOBS_TOTAL.labels(status="failed").inc()
+        metrics.LANGID_JOBS_TOTAL.labels(status="failed").inc()
         return {
             "error": "ModelInitializationError",
             "error_message": str(e),
@@ -128,17 +125,9 @@ def detect_language(file_path: str) -> Dict[str, Any]:
 
     # 3. Detect Language (No VAD Path)
     log.info("Starting language inference.")
-    features = model.feature_extractor(audio)
-    if features.shape[-1] < 10: # If audio is too short
-        log.warning("Audio is too short for language detection.")
-        lang, prob = "und", 0.0
-    else:
-        # Detect language on the first 30 seconds of audio
-        segment = features[:, : model.feature_extractor.nb_max_frames]
-        encoder_output = model.model.encode(segment)
-        results = model.model.detect_language(encoder_output)
-        # Bypassing the transcribe() path for pure langid
-        lang, prob = results[0][0]
+
+    # Use the supported API to detect language by passing the audio array directly
+    lang, prob, _ = model.detect_language(audio)
 
     log.info(f"Inference complete. Language: {lang}, Probability: {prob:.2f}")
 

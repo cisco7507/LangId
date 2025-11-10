@@ -21,7 +21,7 @@ def fresh_metrics_registry(monkeypatch):
     # Give each test a clean, isolated registry
     reg = CollectorRegistry(auto_describe=True)
     m._swap_registry_for_tests(reg)
-    yield
+    yield reg
 
 @pytest.fixture()
 def client():
