@@ -2,8 +2,9 @@ import io
 import wave
 import struct
 import math
-import time
-
+import pytest
+from langid_service.app.worker.runner import process_one_sync
+from langid_service.app.database import SessionLocal
 
 def make_tone_wav(duration_s=0.3, freq_hz=440.0, rate=16000):
     """Generate a small in-memory WAV tone (sine wave)."""
@@ -20,36 +21,50 @@ def make_tone_wav(duration_s=0.3, freq_hz=440.0, rate=16000):
     buf.seek(0)
     return buf
 
-
-def test_submit_and_detect_en(client):
-    # create a small valid wav buffer
+def test_submit_and_detect_sync(client):
+    """
+    Tests job submission and synchronous processing.
+    """
+    # Create a small valid wav buffer
     wav_buf = make_tone_wav()
-
     data = {"file": ("clip_en.wav", wav_buf, "audio/wav")}
+    # Submit the job
     r = client.post("/jobs", files=data)
     assert r.status_code == 200, r.text
     job_id = r.json()["job_id"]
     assert r.json()["status"] == "queued"
-
-    # poll for result
-    status = None
-    for _ in range(120):  # up to ~6s
-        s = client.get(f"/jobs/{job_id}")
-        assert s.status_code == 200
-        js = s.json()
-        status = js["status"]
-        if status in ("succeeded", "failed"):
-            break
-        time.sleep(0.1)
-
-    assert status == "succeeded", f"Job stuck in {status}"
-
-    # confirm result endpoint works
+    # Process the job synchronously
+    db_session = SessionLocal()
+    try:
+        process_one_sync(job_id, db_session)
+    finally:
+        db_session.close()
+    # Check the job status
+    s = client.get(f"/jobs/{job_id}")
+    assert s.status_code == 200
+    js = s.json()
+    assert js["status"] == "succeeded", f"Job failed: {js.get('error')}"
+    # Confirm the result endpoint works
     res = client.get(f"/jobs/{job_id}/result")
     assert res.status_code == 200, res.text
     js = res.json()
-    assert "language" in js
+    assert "language_mapped" in js
     assert "probability" in js
+
+def test_get_result_for_incomplete_job(client):
+    """
+    Tests that the result endpoint returns 409 for incomplete jobs.
+    """
+    # Create a small valid wav buffer
+    wav_buf = make_tone_wav()
+    data = {"file": ("clip_en.wav", wav_buf, "audio/wav")}
+    # Submit the job
+    r = client.post("/jobs", files=data)
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+    # Check the result endpoint
+    res = client.get(f"/jobs/{job_id}/result")
+    assert res.status_code == 409, res.text
 
 def test_get_jobs(client):
     r = client.get("/jobs")

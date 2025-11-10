@@ -85,8 +85,8 @@ WHISPER_DEVICE=cpu
 # Compute precision ('int8', 'float16', 'float32')
 WHISPER_COMPUTE=int8
 
-# Maximum allowed upload size in bytes (default: 100 MB)
-MAX_UPLOAD_BYTES=104857600
+# Maximum allowed upload size in MB (default: 100)
+MAX_FILE_SIZE_MB=100
 
 # Number of concurrent background workers
 MAX_WORKERS=4
@@ -158,7 +158,7 @@ A script is provided to purge old jobs. It's recommended to automate this with T
 
 1.  **Create a PowerShell script wrapper** (e.g., `C:\langid_service\scripts\run_purge.ps1`):
     ```powershell
-    C:\langid_service\.venv\Scripts\python.exe C:\langid_service\scripts\purge_db.py --keep-days 7 --purge-files
+    C:\langid_service\.venv\Scripts\python.exe C:\langid_service\app\maintenance\purge_db.py --keep-days 7 --purge-files
     ```
 2.  **Create a new Basic Task** in Windows Task Scheduler.
 3.  Set the **Trigger** to run daily (e.g., at 2:00 AM).
@@ -166,16 +166,19 @@ A script is provided to purge old jobs. It's recommended to automate this with T
     *   **Program/script:** `powershell.exe`
     *   **Add arguments (optional):** `-File "C:\langid_service\scripts\run_purge.ps1"`
 
-## 6. Model and Language Detection Details
+## 6. Language Detection Path
 
-The core language detection logic resides in `app\services\detector.py`.
+The core language detection logic resides in `app\services\detector.py`. The service uses a deterministic, no-VAD (Voice Activity Detection) path for language detection. This is a critical design choice to ensure that the language detection is consistent and not affected by the presence or absence of speech in the audio.
 
-**VAD (Voice Activity Detection):**
-*   **For Language Detection:** VAD is **disabled** to analyze the first 30 seconds of audio in its entirety.
-*   **For Transcription:** VAD is **enabled** to improve transcription quality by segmenting speech.
+**Why No-VAD for Language Detection?**
 
-**Detector Logic:**
-The `detect_language()` function uses `model.detect_language()` from the `faster-whisper` library to identify the language with the highest probability.
+VAD is a technique used to identify and segment speech in an audio stream. While it is a valuable tool for transcription, it can be detrimental to language detection. The `faster-whisper` model's language detection is based on the analysis of the entire audio signal, including non-speech segments. By disabling VAD, we ensure that the model receives the full, unaltered audio signal, which leads to more accurate and consistent language identification.
+
+**The Detection Pipeline:**
+
+1.  **Audio Loading:** The audio file is loaded and resampled to 16kHz mono, 32-bit float.
+2.  **Feature Extraction:** The audio is converted into a mel spectrogram.
+3.  **Language Detection:** The `detect_language` method of the `WhisperModel` is used to identify the language with the highest probability. This method does not use VAD.
 
 **Model Comparison:**
 
@@ -197,7 +200,7 @@ The `detect_language()` function uses `model.detect_language()` from the `faster
 | `/jobs/by-url`          | `POST` | Submit a job from a URL.                  |
 | `/jobs/{job_id}`        | `GET`  | Get job status.                           |
 | `/jobs/{job_id}/result` | `GET`  | Get job result.                           |
-| `/metrics`              | `GET`  | Get Prometheus-formatted metrics.         |
+| `/metrics/prometheus`   | `GET`  | Get Prometheus-formatted metrics.         |
 
 **`POST /jobs`**
 Uploads an audio file as `multipart/form-data`.
@@ -221,7 +224,7 @@ When running under NSSM, logs are typically directed to the `logs` folder within
 *   `C:\langid_service\logs\service.err.log`: Standard error.
 
 **Diagnosing Common Errors:**
-*   **`av.error.InvalidDataError`**: The audio file is likely corrupt or in an unsupported format.
+*   **`InvalidAudioError`**: The audio file is likely corrupt or in an unsupported format.
 *   **`No module named faster_whisper`**: The service is running outside of its virtual environment. Check the paths in your NSSM configuration to ensure it's using the Python executable from the `.venv` directory.
 
 ## 9. Future Work & Scaling

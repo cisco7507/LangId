@@ -90,34 +90,17 @@ def get_metrics():
         queue=QueueMetrics(**queue_data),
     )
 
+from prometheus_client import generate_latest, REGISTRY
+from .metrics import LANGID_JOBS_TOTAL, LANGID_INFER_DURATION_MS, LANGID_DECODE_FAIL_TOTAL, LANGID_LANG_PROBABILITY
+
 @app.get("/metrics/prometheus", response_class=Response)
 def get_prometheus_metrics():
-    queue_data = get_metrics_data()
+    # Unregister the default collectors
+    for collector in list(REGISTRY._collector_to_names.keys()):
+        if collector.__class__.__name__ not in ('Counter', 'Histogram', 'Gauge'):
+            REGISTRY.unregister(collector)
 
-    # Model info
-    model_size = WHISPER_MODEL_SIZE
-    model_device = os.environ.get("WHISPER_DEVICE", "cpu")
-    model_compute = os.environ.get("WHISPER_COMPUTE", "int8")
-
-    # Prometheus format
-    lines = [
-        "# HELP langid_workers_configured Number of background workers configured.",
-        "# TYPE langid_workers_configured gauge",
-        f"langid_workers_configured {MAX_WORKERS}",
-        "",
-        "# HELP langid_queue_total Current queue size and recent outcomes.",
-        "# TYPE langid_queue_total gauge",
-        f'langid_queue_total{{state="queued"}} {queue_data["queued"]}',
-        f'langid_queue_total{{state="running"}} {queue_data["running"]}',
-        f'langid_queue_total{{state="succeeded_24h"}} {queue_data["succeeded_24h"]}',
-        f'langid_queue_total{{state="failed_24h"}} {queue_data["failed_24h"]}',
-        "",
-        "# HELP langid_model_info Model configuration (labels only).",
-        "# TYPE langid_model_info gauge",
-        f'langid_model_info{{size="{model_size}",device="{model_device}",compute="{model_compute}"}} 1',
-    ]
-
-    return Response(content="\n".join(lines), media_type="text/plain")
+    return Response(content=generate_latest(REGISTRY), media_type="text/plain")
 
 @app.get("/jobs", response_model=JobListResponse)
 def get_jobs():
@@ -178,6 +161,8 @@ async def submit_job(file: UploadFile = File(...)):
 
     return EnqueueResponse(job_id=job_id, status="queued")
 
+from .config import MAX_FILE_SIZE_MB
+
 @app.post("/jobs/by-url", response_model=EnqueueResponse)
 async def submit_job_by_url(payload: SubmitByUrl):
     # Simple URL fetch (no auth) — for production, prefer signed URLs or internal sources.
@@ -185,12 +170,20 @@ async def submit_job_by_url(payload: SubmitByUrl):
     job_id = gen_uuid()
     tmp_file = Path(tempfile.gettempdir()) / f"{job_id}.wav"
 
-    # Cast Pydantic Url to plain string
-    url = str(payload.url)
+    url = payload.url
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Invalid URL scheme")
 
     try:
-        # Be explicit about string types for stdlib
-        urllib.request.urlretrieve(url, str(tmp_file))
+        with urllib.request.urlopen(url) as response:
+            file_size = int(response.headers.get("Content-Length", 0))
+            if file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File size ({file_size / 1024 / 1024:.2f} MB) exceeds limit of {MAX_FILE_SIZE_MB} MB",
+                )
+            with open(tmp_file, "wb") as f:
+                f.write(response.read())
 
         validate_upload(str(tmp_file), tmp_file.stat().st_size)
         stored = move_to_storage(tmp_file, job_id)

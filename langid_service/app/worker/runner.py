@@ -68,3 +68,12 @@ def work_once() -> Optional[str]:
         return job.id
     finally:
         session.close()
+
+def process_one_sync(job_id: str, db_session: Session) -> None:
+    """
+    Processes a single job synchronously for deterministic testing.
+    """
+    job = db_session.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise ValueError(f"Job not found: {job_id}")
+    process_one(db_session, job)

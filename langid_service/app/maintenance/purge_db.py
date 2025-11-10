@@ -8,8 +8,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]  # repo root
 DB_PATH = ROOT / "langid.sqlite"
-INPUT_DIR = ROOT / "storage" / "input"
-OUTPUT_DIR = ROOT / "storage" / "output"
+STORAGE_DIR = ROOT / "storage"
 
 log = logging.getLogger("purge_db")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -41,9 +40,8 @@ def pick_timestamp_column(conn: sqlite3.Connection) -> str:
 def purge_jobs(conn: sqlite3.Connection, keep_days: int, batch_size: int) -> int:
     """
     Portable batched purge:
-      1) SELECT ids of old succeeded/failed jobs (LIMIT ?)
-      2) DELETE FROM jobs WHERE id IN (…)
-    Repeat until no more rows match.
+      1) SELECT ids of old succeeded/failed jobs
+      2) DELETE FROM jobs WHERE id IN (…) in batches
     """
     ts_col = pick_timestamp_column(conn)
     cutoff = cutoff_iso(keep_days)
@@ -55,17 +53,15 @@ def purge_jobs(conn: sqlite3.Connection, keep_days: int, batch_size: int) -> int
       WHERE status IN ('succeeded','failed')
         AND {ts_col} IS NOT NULL
         AND {ts_col} < ?
-      LIMIT ?
     """
 
-    while True:
-        ids = [row["id"] for row in conn.execute(sel_sql, (cutoff, batch_size))]
-        if not ids:
-            break
+    ids = [row["id"] for row in conn.execute(sel_sql, (cutoff,))]
 
-        placeholders = ",".join("?" for _ in ids)
+    for i in range(0, len(ids), batch_size):
+        batch_ids = ids[i:i + batch_size]
+        placeholders = ",".join("?" for _ in batch_ids)
         del_sql = f"DELETE FROM jobs WHERE id IN ({placeholders})"
-        cur = conn.execute(del_sql, ids)
+        cur = conn.execute(del_sql, batch_ids)
         conn.commit()
         total_deleted += cur.rowcount or 0
 
@@ -80,7 +76,7 @@ def fetch_known_ids(conn: sqlite3.Connection) -> set[str]:
 
 def purge_orphan_files(known_ids: set[str], older_than_days: int) -> tuple[int, int]:
     """
-    Remove files under storage/{input,output} that don't map to any job id
+    Remove files under storage that don't map to any job id
     or are older than retention.
     """
     removed = 0
@@ -105,10 +101,9 @@ def purge_orphan_files(known_ids: set[str], older_than_days: int) -> tuple[int, 
             except Exception:
                 pass
 
-    for directory in (INPUT_DIR, OUTPUT_DIR):
-        if directory.exists():
-            for p in directory.iterdir():
-                maybe_rm(p)
+    if STORAGE_DIR.exists():
+        for p in STORAGE_DIR.iterdir():
+            maybe_rm(p)
 
     return removed, scanned
 
@@ -149,16 +144,19 @@ def main():
     conn = connect(DB_PATH)
     try:
         maybe_prepare_indexes(conn)
-        deleted = purge_jobs(conn, args.keep_days, args.batch)
-        log.info(f"Deleted rows: {deleted}")
+        deleted_jobs = purge_jobs(conn, args.keep_days, args.batch)
+        log.info(f"Deleted jobs: {deleted_jobs}")
 
+        deleted_files = 0
         if args.purge_files:
             known = fetch_known_ids(conn)
-            removed, scanned = purge_orphan_files(known, args.keep_days)
-            log.info(f"Files scanned: {scanned}  removed: {removed}")
+            deleted_files, scanned_files = purge_orphan_files(known, args.keep_days)
+            log.info(f"Files scanned: {scanned_files}  removed: {deleted_files}")
 
         maybe_vacuum(conn, args.vacuum)
         log.info("Purge complete.")
+        print(f"Deleted jobs: {deleted_jobs}")
+        print(f"Deleted files: {deleted_files}")
     finally:
         conn.close()
 

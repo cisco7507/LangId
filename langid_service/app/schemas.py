@@ -24,7 +24,7 @@ class ResultResponse(BaseModel):
     raw: dict
 
 class SubmitByUrl(BaseModel):
-    url: HttpUrl
+    url: str
 
 class ModelMetrics(BaseModel):
     size: str
