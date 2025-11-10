@@ -27,9 +27,17 @@ function App() {
   const handleRowClick = (job) => {
     if (job.status === 'succeeded') {
       fetch(`/jobs/${job.job_id}/result`)
-        .then(response => response.json())
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Network response was not ok');
+          }
+          return response.json();
+        })
         .then(data => setSelectedJobResult(data))
-        .catch(error => console.error('Error fetching job result:', error));
+        .catch(error => {
+          console.error('Error fetching job result:', error);
+          setSelectedJobResult({ job_id: job.job_id, error: 'Failed to fetch result' });
+        });
     }
   };
 

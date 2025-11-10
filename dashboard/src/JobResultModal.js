@@ -7,6 +7,10 @@ function JobResultModal({ jobResult, onClose }) {
   const [error, setError] = useState(null);
 
   useEffect(() => {
+    if (!jobResult) {
+      fetchedRef.current = false;
+      return;
+    }
     if (fetchedRef.current) return;
     fetchedRef.current = true;
 
