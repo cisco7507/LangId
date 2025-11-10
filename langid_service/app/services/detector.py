@@ -123,12 +123,11 @@ def detect_language(file_path: str) -> Dict[str, Any]:
         }
 
 
-    # 3. Detect Language (No VAD Path)
-    log.info("Starting language inference.")
-
-    # Use the supported API to detect language by passing the audio array directly
-    lang, prob, _ = model.detect_language(audio)
-
+    # 3. Detect Language using transcribe
+    log.info("Starting language inference via transcribe.")
+    segments, info = model.transcribe(audio, vad_filter=False, beam_size=1)
+    lang = info.language
+    prob = info.language_probability
     log.info(f"Inference complete. Language: {lang}, Probability: {prob:.2f}")
 
     # 4. Map and Return Result
