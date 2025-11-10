@@ -128,7 +128,17 @@ def detect_language(file_path: str) -> Dict[str, Any]:
     segments, info = model.transcribe(audio, vad_filter=False, beam_size=1)
     lang = info.language
     prob = info.language_probability
-    log.info(f"Inference complete. Language: {lang}, Probability: {prob:.2f}")
+
+    # Extract the first segment as a snippet
+    snippet = ""
+    try:
+        first_segment = next(segments, None)
+        if first_segment:
+            snippet = first_segment.text.strip()
+    except StopIteration:
+        pass # No segments found
+
+    log.info(f"Inference complete. Language: {lang}, Probability: {prob:.2f}, Snippet: '{snippet}'")
 
     # 4. Map and Return Result
     mapped_lang = LANG_CODE_MAPPING.get(lang, "und")
@@ -138,6 +148,7 @@ def detect_language(file_path: str) -> Dict[str, Any]:
         "language_raw": lang,
         "language_mapped": mapped_lang,
         "probability": float(prob),
+        "transcript_snippet": snippet,
         "processing_ms": elapsed_ms,
         "model": WHISPER_MODEL_SIZE,
         "info": {
